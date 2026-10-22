@@ -1,5 +1,5 @@
-use core::time::Duration;
-use std::time::Instant;
+use core::{cell::RefCell, time::Duration};
+use std::{rc::Rc, time::Instant};
 
 use winit::{
     application::ApplicationHandler,
@@ -80,7 +80,7 @@ fn with_event_loop<R>(
 struct WinitAppWrapper<T: WinitApp> {
     windows_next_repaint_times: HashMap<WindowId, Instant>,
     winit_app: T,
-    return_result: Result<(), crate::Error>,
+    return_result: Rc<RefCell<Result<(), crate::Error>>>,
     run_and_return: bool,
 }
 
@@ -142,7 +142,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         Self {
             windows_next_repaint_times: HashMap::default(),
             winit_app,
-            return_result: Ok(()),
+            return_result: Rc::new(RefCell::new(Ok(()))),
             run_and_return,
         }
     }
@@ -214,7 +214,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         if let Err(err) = combined_result {
             log::error!("Exiting because of error: {err}");
             exit = true;
-            self.return_result = Err(err);
+            *self.return_result.borrow_mut() = Err(err);
         }
 
         if save {
@@ -313,6 +313,7 @@ impl<T: WinitApp> Drop for WinitAppWrapper<T> {
         self.winit_app.save_and_destroy();
     }
 }
+
 impl<T: WinitApp> ApplicationHandler for WinitAppWrapper<T> {
     fn destroy_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         profiling::scope!("Event::Suspended");
@@ -368,6 +369,19 @@ impl<T: WinitApp> ApplicationHandler for WinitAppWrapper<T> {
         window_id: WindowId,
         event: winit::event::WindowEvent,
     ) {
+        // AppKit closes native windows before terminating its owned handler. This
+        // also covers externally pumped loops, where the wrapper itself is borrowed.
+        #[cfg(target_os = "macos")]
+        if matches!(event, winit::event::WindowEvent::Destroyed)
+            && self
+                .winit_app
+                .window_id_from_viewport_id(egui::ViewportId::ROOT)
+                == Some(window_id)
+        {
+            self.winit_app.save_and_destroy();
+            return;
+        }
+
         profiling::function_scope!(egui_winit::short_window_event_description(&event));
 
         // Nb: Make sure this guard is dropped after this function returns.
@@ -390,10 +404,12 @@ fn run_and_return(event_loop: &mut EventLoop, winit_app: impl WinitApp) -> Resul
 
     log::trace!("Entering the winit event loop (run_app_on_demand)…");
 
-    let mut app = WinitAppWrapper::new(winit_app, true);
-    event_loop.run_app_on_demand(&mut app)?;
+    let app = WinitAppWrapper::new(winit_app, true);
+    let return_result = Rc::clone(&app.return_result);
+    // The event loop must own the handler so native termination drops and saves it.
+    event_loop.run_app_on_demand(app)?;
     log::debug!("eframe window closed");
-    core::mem::replace(&mut app.return_result, Ok(()))
+    return_result.replace(Ok(()))
 }
 
 #[cfg(not(target_os = "ios"))]
@@ -401,9 +417,9 @@ fn run_and_exit(mut event_loop: EventLoop, winit_app: impl WinitApp) -> Result {
     log::trace!("Entering the winit event loop (run_app)…");
 
     // When to repaint what window
-    let mut app = WinitAppWrapper::new(winit_app, false);
+    let app = WinitAppWrapper::new(winit_app, false);
     use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand as _;
-    event_loop.run_app_on_demand(&mut app)?;
+    event_loop.run_app_on_demand(app)?;
 
     log::debug!("winit event loop unexpectedly returned");
     Ok(())

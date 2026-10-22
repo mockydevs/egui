@@ -135,6 +135,7 @@ pub struct State {
     allow_ime: bool,
     ime_rect_px: Option<egui::Rect>,
     old_ime_purpose: egui::IMEPurpose,
+    ime_binding: Option<ime::Binding>,
 
     /// Used by [`State::try_on_ime_processed_keyboard_input`] to track key
     /// release events that should be filtered out. See comments in that method
@@ -194,6 +195,7 @@ impl State {
             allow_ime: false,
             ime_rect_px: None,
             old_ime_purpose: egui::IMEPurpose::Normal,
+            ime_binding: None,
             #[cfg(target_os = "windows")]
             pressed_processed_physical_keys: HashSet::new(),
         };
@@ -293,6 +295,7 @@ impl State {
     /// Use [`update_viewport_info`] to update the info for each
     /// viewport.
     pub fn take_egui_input(&mut self, window: &dyn Window) -> egui::RawInput {
+        ime::Binding::bind(&mut self.ime_binding, &self.egui_ctx, window.id());
         profiling::function_scope!();
 
         self.egui_input.time = Some(self.start_time.elapsed().as_secs_f64());
@@ -329,6 +332,7 @@ impl State {
         event_loop: &dyn ActiveEventLoop,
         event: &winit::event::WindowEvent,
     ) -> EventResponse {
+        ime::Binding::bind(&mut self.ime_binding, &self.egui_ctx, window.id());
         profiling::function_scope!(short_window_event_description(event));
 
         #[cfg(feature = "accesskit")]
@@ -337,6 +341,9 @@ impl State {
         }
 
         use winit::event::WindowEvent;
+        if matches!(event, WindowEvent::Destroyed) {
+            ime::forget(&self.egui_ctx, window.id());
+        }
 
         #[cfg(target_os = "ios")]
         match &event {
@@ -1224,6 +1231,7 @@ impl State {
         event_loop: Option<&dyn ActiveEventLoop>,
         platform_output: egui::PlatformOutput,
     ) {
+        ime::Binding::bind(&mut self.ime_binding, &self.egui_ctx, window.id());
         profiling::function_scope!();
 
         let egui::PlatformOutput {
@@ -1275,7 +1283,7 @@ impl State {
             }
 
             profiling::scope!("set_ime_allowed");
-            ime::set_allowed(window, allow_ime);
+            ime::set_allowed(&self.egui_ctx, window, allow_ime);
         }
 
         if let Some(ime) = ime {
@@ -1283,13 +1291,13 @@ impl State {
                 // TODO(umajho): use a more proper way to interrupt composition
                 // if `winit` provides one in the future.
 
-                ime::set_allowed(window, false);
-                ime::set_allowed(window, true);
+                ime::set_allowed(&self.egui_ctx, window, false);
+                ime::set_allowed(&self.egui_ctx, window, true);
             }
 
             if ime.purpose != self.old_ime_purpose {
                 self.old_ime_purpose = ime.purpose;
-                ime::set_purpose(window, to_winit_ime_purpose(ime.purpose));
+                ime::set_purpose(&self.egui_ctx, window, to_winit_ime_purpose(ime.purpose));
             }
 
             let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
@@ -1300,6 +1308,7 @@ impl State {
                 self.ime_rect_px = Some(ime_rect_px);
                 profiling::scope!("set_ime_cursor_area");
                 ime::set_cursor_area(
+                    &self.egui_ctx,
                     window,
                     winit::dpi::PhysicalPosition {
                         x: ime_rect_px.min.x,
@@ -2024,6 +2033,7 @@ fn process_viewport_command(
         }
         ViewportCommand::IMERect(rect) => {
             ime::set_cursor_area(
+                egui_ctx,
                 window,
                 (PhysicalPosition::new(
                     pixels_per_point * rect.min.x,
@@ -2037,8 +2047,10 @@ fn process_viewport_command(
                 .into(),
             );
         }
-        ViewportCommand::IMEAllowed(v) => ime::set_allowed(window, v),
-        ViewportCommand::IMEPurpose(p) => ime::set_purpose(window, to_winit_ime_purpose(p)),
+        ViewportCommand::IMEAllowed(v) => ime::set_allowed(egui_ctx, window, v),
+        ViewportCommand::IMEPurpose(p) => {
+            ime::set_purpose(egui_ctx, window, to_winit_ime_purpose(p));
+        }
         ViewportCommand::Focus => {
             if !window.has_focus() {
                 window.focus_window();
