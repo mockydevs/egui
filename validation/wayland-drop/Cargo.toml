@@ -1,0 +1,21 @@
+[package]
+name = "wayland-drop-review-evidence"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+winit = { git = "https://github.com/mockydevs/winit", rev = "4c38d2fe338245fb7a20602466cab94973313792", default-features = false, features = ["wayland", "wayland-dlopen", "wayland-portal"] }
+egui = { path = "../../crates/egui" }
+egui-winit = { path = "../../crates/egui-winit", default-features = false, features = ["wayland"] }
+wayland-server = "0.31"
+wayland-protocols = { version = "0.32", features = ["server"] }
+tempfile = "3"
+dbus = { version = "0.9.12", features = ["stdfd"] }
+
+[patch.crates-io]
+smithay-client-toolkit = { git = "https://github.com/mockydevs/client-toolkit", rev = "d78cab10c8945a83f7a39aaf264c3ae679ca9d1e" }
+winit = { git = "https://github.com/mockydevs/winit", rev = "4c38d2fe338245fb7a20602466cab94973313792" }
+
+[workspace]
