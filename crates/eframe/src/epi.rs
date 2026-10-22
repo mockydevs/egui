@@ -31,7 +31,7 @@ pub use winit::{event_loop::EventLoopBuilder, window::WindowAttributes};
 /// done by `EFrame`.
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(any(feature = "glow", feature = "wgpu_no_default_features"))]
-pub type EventLoopBuilderHook = Box<dyn FnOnce(&mut EventLoopBuilder<UserEvent>)>;
+pub type EventLoopBuilderHook = Box<dyn FnOnce(&mut EventLoopBuilder)>;
 
 /// Hook into the building of a the native window.
 ///
@@ -46,8 +46,14 @@ type DynError = Box<dyn core::error::Error + Send + Sync>;
 /// This is how your app is created.
 ///
 /// You can use the [`CreationContext`] to setup egui, restore state, setup OpenGL things, etc.
+#[cfg(not(target_os = "ios"))]
 pub type AppCreator<'app> =
     Box<dyn 'app + FnOnce(&CreationContext<'_>) -> Result<Box<dyn 'app + App>, DynError>>;
+
+/// iOS owns the application for the lifetime of its event loop; borrowed apps are unsupported.
+#[cfg(target_os = "ios")]
+pub type AppCreator<'app> =
+    Box<dyn 'static + FnOnce(&CreationContext<'_>) -> Result<Box<dyn 'static + App>, DynError>>;
 
 /// Data that is passed to [`AppCreator`] that can be used to setup and initialize your app.
 pub struct CreationContext<'s> {
@@ -85,7 +91,7 @@ pub struct CreationContext<'s> {
 
     /// The root [`winit::window::Window`].
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) window: Option<std::sync::Arc<winit::window::Window>>,
+    pub(crate) window: Option<std::sync::Arc<dyn winit::window::Window>>,
 
     /// Raw platform window handle
     #[cfg(not(target_arch = "wasm32"))]
@@ -141,7 +147,7 @@ impl CreationContext<'_> {
     ///
     /// `None` for headless (tests etc).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn winit_window(&self) -> Option<&std::sync::Arc<winit::window::Window>> {
+    pub fn winit_window(&self) -> Option<&std::sync::Arc<dyn winit::window::Window>> {
         self.window.as_ref()
     }
 }
@@ -681,7 +687,7 @@ pub struct Frame {
 
     /// The current [`winit::window::Window`] (i.e. the one the active viewport is rendered to).
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) window: Option<std::sync::Arc<winit::window::Window>>,
+    pub(crate) window: Option<std::sync::Arc<dyn winit::window::Window>>,
 
     /// Raw platform window handle
     #[cfg(not(target_arch = "wasm32"))]
@@ -763,7 +769,7 @@ impl Frame {
     ///
     /// `None` for headless (tests etc).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn winit_window(&self) -> Option<&std::sync::Arc<winit::window::Window>> {
+    pub fn winit_window(&self) -> Option<&std::sync::Arc<dyn winit::window::Window>> {
         self.window.as_ref()
     }
 

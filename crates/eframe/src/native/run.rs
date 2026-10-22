@@ -27,12 +27,12 @@ use crate::{
 const INVISIBLE_WINDOW_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
 // ----------------------------------------------------------------------------
-fn create_event_loop(native_options: &mut epi::NativeOptions) -> Result<EventLoop<UserEvent>> {
+fn create_event_loop(native_options: &mut epi::NativeOptions) -> Result<EventLoop> {
     #[cfg(target_os = "android")]
     use winit::platform::android::EventLoopBuilderExtAndroid as _;
 
     profiling::function_scope!();
-    let mut builder = winit::event_loop::EventLoop::with_user_event();
+    let mut builder = winit::event_loop::EventLoop::builder();
 
     #[cfg(target_os = "android")]
     let mut builder =
@@ -57,9 +57,9 @@ fn create_event_loop(native_options: &mut epi::NativeOptions) -> Result<EventLoo
 #[cfg(not(target_os = "ios"))]
 fn with_event_loop<R>(
     mut native_options: epi::NativeOptions,
-    f: impl FnOnce(&mut EventLoop<UserEvent>, epi::NativeOptions) -> R,
+    f: impl FnOnce(&mut EventLoop, epi::NativeOptions) -> R,
 ) -> Result<R> {
-    thread_local!(static EVENT_LOOP: core::cell::RefCell<Option<EventLoop<UserEvent>>> = const { core::cell::RefCell::new(None) });
+    thread_local!(static EVENT_LOOP: core::cell::RefCell<Option<EventLoop>> = const { core::cell::RefCell::new(None) });
 
     EVENT_LOOP.with(|event_loop| {
         // Since we want to reference NativeOptions when creating the EventLoop we can't
@@ -85,6 +85,59 @@ struct WinitAppWrapper<T: WinitApp> {
 }
 
 impl<T: WinitApp> WinitAppWrapper<T> {
+    fn handle_user_event(&mut self, event_loop: &dyn ActiveEventLoop, event: UserEvent) {
+        profiling::function_scope!(match &event {
+            UserEvent::RequestRepaint { .. } => "UserEvent::RequestRepaint",
+            #[cfg(feature = "accesskit")]
+            UserEvent::AccessKitActionRequest(_) => "UserEvent::AccessKitActionRequest",
+        });
+
+        event_loop_context::with_event_loop_context(event_loop, move || {
+            let event_result = match event {
+                UserEvent::RequestRepaint {
+                    when,
+                    cumulative_pass_nr,
+                    viewport_id,
+                } => {
+                    let current_pass_nr = self
+                        .winit_app
+                        .egui_ctx()
+                        .map_or(0, |ctx| ctx.cumulative_pass_nr_for(viewport_id));
+                    if current_pass_nr == cumulative_pass_nr
+                        || current_pass_nr == cumulative_pass_nr + 1
+                    {
+                        log::trace!("UserEvent::RequestRepaint scheduling repaint at {when:?}");
+                        if let Some(window_id) =
+                            self.winit_app.window_id_from_viewport_id(viewport_id)
+                        {
+                            // Throttle repaints for invisible windows to prevent
+                            // high CPU usage on Windows.
+                            // See: https://github.com/emilk/egui/issues/7776
+                            let when = if let Some(window) = self.winit_app.window(window_id)
+                                && is_invisible_or_minimized(window.as_ref())
+                            {
+                                when.max(Instant::now() + INVISIBLE_WINDOW_REPAINT_INTERVAL)
+                            } else {
+                                when
+                            };
+                            Ok(EventResult::RepaintAt(window_id, when))
+                        } else {
+                            Ok(EventResult::Wait)
+                        }
+                    } else {
+                        log::trace!("Got outdated UserEvent::RequestRepaint");
+                        Ok(EventResult::Wait) // old request - we've already repainted
+                    }
+                }
+                #[cfg(feature = "accesskit")]
+                UserEvent::AccessKitActionRequest(request) => {
+                    self.winit_app.on_accesskit_event(request)
+                }
+            };
+            self.handle_event_result(event_loop, event_result);
+        });
+    }
+
     fn new(winit_app: T, run_and_return: bool) -> Self {
         Self {
             windows_next_repaint_times: HashMap::default(),
@@ -96,7 +149,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
 
     fn handle_event_result(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn ActiveEventLoop,
         event_result: Result<EventResult>,
     ) {
         let mut exit = false;
@@ -186,7 +239,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         self.check_redraw_requests(event_loop);
     }
 
-    fn check_redraw_requests(&mut self, event_loop: &ActiveEventLoop) {
+    fn check_redraw_requests(&mut self, event_loop: &dyn ActiveEventLoop) {
         let now = Instant::now();
 
         let mut invisible_window_ids = Vec::new();
@@ -203,7 +256,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                     // never be processed. We collect these windows to paint them
                     // directly below.
                     // See: https://github.com/emilk/egui/issues/5229
-                    if is_invisible_or_minimized(&window) {
+                    if is_invisible_or_minimized(window.as_ref()) {
                         invisible_window_ids.push(*window_id);
                     } else {
                         log::trace!("request_redraw for {window_id:?}");
@@ -255,8 +308,13 @@ impl<T: WinitApp> WinitAppWrapper<T> {
     }
 }
 
-impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
-    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+impl<T: WinitApp> Drop for WinitAppWrapper<T> {
+    fn drop(&mut self) {
+        self.winit_app.save_and_destroy();
+    }
+}
+impl<T: WinitApp> ApplicationHandler for WinitAppWrapper<T> {
+    fn destroy_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         profiling::scope!("Event::Suspended");
 
         event_loop_context::with_event_loop_context(event_loop, move || {
@@ -265,7 +323,7 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
         });
     }
 
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         profiling::scope!("Event::Resumed");
 
         // Nb: Make sure this guard is dropped after this function returns.
@@ -275,19 +333,10 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
         });
     }
 
-    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        // On Mac, Cmd-Q we get here and then `run_app_on_demand` doesn't return (despite its name),
-        // so we need to save state now:
-        log::debug!("Received Event::LoopExiting - saving app state…");
-        event_loop_context::with_event_loop_context(event_loop, move || {
-            self.winit_app.save_and_destroy();
-        });
-    }
-
     fn device_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
-        device_id: winit::event::DeviceId,
+        event_loop: &dyn ActiveEventLoop,
+        device_id: Option<winit::event::DeviceId>,
         event: winit::event::DeviceEvent,
     ) {
         profiling::function_scope!(egui_winit::short_device_event_description(&event));
@@ -299,60 +348,13 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
         });
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        profiling::function_scope!(match &event {
-            UserEvent::RequestRepaint { .. } => "UserEvent::RequestRepaint",
-            #[cfg(feature = "accesskit")]
-            UserEvent::AccessKitActionRequest(_) => "UserEvent::AccessKitActionRequest",
-        });
-
-        event_loop_context::with_event_loop_context(event_loop, move || {
-            let event_result = match event {
-                UserEvent::RequestRepaint {
-                    when,
-                    cumulative_pass_nr,
-                    viewport_id,
-                } => {
-                    let current_pass_nr = self
-                        .winit_app
-                        .egui_ctx()
-                        .map_or(0, |ctx| ctx.cumulative_pass_nr_for(viewport_id));
-                    if current_pass_nr == cumulative_pass_nr
-                        || current_pass_nr == cumulative_pass_nr + 1
-                    {
-                        log::trace!("UserEvent::RequestRepaint scheduling repaint at {when:?}");
-                        if let Some(window_id) =
-                            self.winit_app.window_id_from_viewport_id(viewport_id)
-                        {
-                            // Throttle repaints for invisible windows to prevent
-                            // high CPU usage on Windows.
-                            // See: https://github.com/emilk/egui/issues/7776
-                            let when = if let Some(window) = self.winit_app.window(window_id)
-                                && is_invisible_or_minimized(&window)
-                            {
-                                when.max(Instant::now() + INVISIBLE_WINDOW_REPAINT_INTERVAL)
-                            } else {
-                                when
-                            };
-                            Ok(EventResult::RepaintAt(window_id, when))
-                        } else {
-                            Ok(EventResult::Wait)
-                        }
-                    } else {
-                        log::trace!("Got outdated UserEvent::RequestRepaint");
-                        Ok(EventResult::Wait) // old request - we've already repainted
-                    }
-                }
-                #[cfg(feature = "accesskit")]
-                UserEvent::AccessKitActionRequest(request) => {
-                    self.winit_app.on_accesskit_event(request)
-                }
-            };
-            self.handle_event_result(event_loop, event_result);
-        });
+    fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
+        for event in self.winit_app.take_user_events() {
+            self.handle_user_event(event_loop, event);
+        }
     }
 
-    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+    fn new_events(&mut self, event_loop: &dyn ActiveEventLoop, cause: winit::event::StartCause) {
         if let winit::event::StartCause::ResumeTimeReached { .. } = cause {
             log::trace!("Woke up to check next_repaint_time");
         }
@@ -362,7 +364,7 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
 
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn ActiveEventLoop,
         window_id: WindowId,
         event: winit::event::WindowEvent,
     ) {
@@ -383,25 +385,33 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
 }
 
 #[cfg(not(target_os = "ios"))]
-fn run_and_return(event_loop: &mut EventLoop<UserEvent>, winit_app: impl WinitApp) -> Result {
-    use winit::platform::run_on_demand::EventLoopExtRunOnDemand as _;
+fn run_and_return(event_loop: &mut EventLoop, winit_app: impl WinitApp) -> Result {
+    use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand as _;
 
     log::trace!("Entering the winit event loop (run_app_on_demand)…");
 
     let mut app = WinitAppWrapper::new(winit_app, true);
     event_loop.run_app_on_demand(&mut app)?;
     log::debug!("eframe window closed");
-    app.return_result
+    core::mem::replace(&mut app.return_result, Ok(()))
 }
 
-fn run_and_exit(event_loop: EventLoop<UserEvent>, winit_app: impl WinitApp) -> Result {
+#[cfg(not(target_os = "ios"))]
+fn run_and_exit(mut event_loop: EventLoop, winit_app: impl WinitApp) -> Result {
     log::trace!("Entering the winit event loop (run_app)…");
 
     // When to repaint what window
     let mut app = WinitAppWrapper::new(winit_app, false);
-    event_loop.run_app(&mut app)?;
+    use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand as _;
+    event_loop.run_app_on_demand(&mut app)?;
 
     log::debug!("winit event loop unexpectedly returned");
+    Ok(())
+}
+
+#[cfg(target_os = "ios")]
+fn run_and_exit(event_loop: EventLoop, winit_app: impl WinitApp + 'static) -> Result {
+    event_loop.run_app(WinitAppWrapper::new(winit_app, false))?;
     Ok(())
 }
 
@@ -436,8 +446,8 @@ pub fn create_glow<'a>(
     app_name: &str,
     native_options: epi::NativeOptions,
     app_creator: epi::AppCreator<'a>,
-    event_loop: &EventLoop<UserEvent>,
-) -> impl ApplicationHandler<UserEvent> + 'a {
+    event_loop: &EventLoop,
+) -> impl ApplicationHandler + 'a {
     use super::glow_integration::GlowWinitApp;
 
     let glow_eframe = GlowWinitApp::new(event_loop, app_name, native_options, None, app_creator);
@@ -475,8 +485,8 @@ pub fn create_wgpu<'a>(
     app_name: &str,
     native_options: epi::NativeOptions,
     app_creator: epi::AppCreator<'a>,
-    event_loop: &EventLoop<UserEvent>,
-) -> impl ApplicationHandler<UserEvent> + 'a {
+    event_loop: &EventLoop,
+) -> impl ApplicationHandler + 'a {
     use super::wgpu_integration::WgpuWinitApp;
 
     let wgpu_eframe = WgpuWinitApp::new(event_loop, app_name, native_options, None, app_creator);
@@ -490,61 +500,57 @@ pub fn create_wgpu<'a>(
 /// This can be run directly on your own [`EventLoop`] by itself or with other
 /// windows you manage outside of eframe.
 pub struct EframeWinitApplication<'a> {
-    wrapper: Box<dyn ApplicationHandler<UserEvent> + 'a>,
+    wrapper: Box<dyn ApplicationHandler + 'a>,
     control_flow: ControlFlow,
 }
 
-impl ApplicationHandler<UserEvent> for EframeWinitApplication<'_> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        self.wrapper.resumed(event_loop);
+impl ApplicationHandler for EframeWinitApplication<'_> {
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.wrapper.can_create_surfaces(event_loop);
     }
 
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn ActiveEventLoop,
         window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
         self.wrapper.window_event(event_loop, window_id, event);
     }
 
-    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+    fn new_events(&mut self, event_loop: &dyn ActiveEventLoop, cause: winit::event::StartCause) {
         self.wrapper.new_events(event_loop, cause);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        self.wrapper.user_event(event_loop, event);
+    fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.wrapper.proxy_wake_up(event_loop);
     }
 
     fn device_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
-        device_id: winit::event::DeviceId,
+        event_loop: &dyn ActiveEventLoop,
+        device_id: Option<winit::event::DeviceId>,
         event: winit::event::DeviceEvent,
     ) {
         self.wrapper.device_event(event_loop, device_id, event);
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         self.wrapper.about_to_wait(event_loop);
         self.control_flow = event_loop.control_flow();
     }
 
-    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
-        self.wrapper.suspended(event_loop);
+    fn destroy_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.wrapper.destroy_surfaces(event_loop);
     }
 
-    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        self.wrapper.exiting(event_loop);
-    }
-
-    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+    fn memory_warning(&mut self, event_loop: &dyn ActiveEventLoop) {
         self.wrapper.memory_warning(event_loop);
     }
 }
 
 impl<'a> EframeWinitApplication<'a> {
-    pub(crate) fn new<T: ApplicationHandler<UserEvent> + 'a>(app: T) -> Self {
+    pub(crate) fn new<T: ApplicationHandler + 'a>(app: T) -> Self {
         Self {
             wrapper: Box::new(app),
             control_flow: ControlFlow::default(),
@@ -561,12 +567,12 @@ impl<'a> EframeWinitApplication<'a> {
     #[cfg(not(target_os = "ios"))]
     pub fn pump_eframe_app(
         &mut self,
-        event_loop: &mut EventLoop<UserEvent>,
+        event_loop: &mut EventLoop,
         timeout: Option<core::time::Duration>,
     ) -> EframePumpStatus {
-        use winit::platform::pump_events::{EventLoopExtPumpEvents as _, PumpStatus};
+        use winit::event_loop::pump_events::{EventLoopExtPumpEvents as _, PumpStatus};
 
-        match event_loop.pump_app_events(timeout, self) {
+        match event_loop.pump_app_events(timeout, &mut *self) {
             PumpStatus::Continue => EframePumpStatus::Continue(self.control_flow),
             PumpStatus::Exit(code) => EframePumpStatus::Exit(code),
         }

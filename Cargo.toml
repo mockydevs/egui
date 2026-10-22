@@ -72,7 +72,7 @@ eframe = { version = "0.36.2", path = "crates/eframe", default-features = false 
 
 accesskit = "0.24.1"
 accesskit_consumer = "0.35.0" # Can't update to 0.36+: kittest 0.4 pins accesskit_consumer 0.35, so bumping splits it into two versions
-accesskit_winit = "0.32.0" # Can't update to 0.33: it needs accesskit_macos 0.26.2, which pulls accesskit_consumer 0.37, duplicating the 0.35 that kittest 0.4 needs. For the same reason, `accesskit_macos` is held at 0.26.0 in `Cargo.lock`.
+accesskit_winit = { git = "https://github.com/mockydevs/accesskit", rev = "ee75aece90ead74bad77ee4d97d19ae37eafdfa5" } # Can't update to 0.33: it needs accesskit_macos 0.26.2, which pulls accesskit_consumer 0.37, duplicating the 0.35 that kittest 0.4 needs. For the same reason, `accesskit_macos` is held at 0.26.0 in `Cargo.lock`.
 ahash = { version = "0.8.12", default-features = false, features = [
   "no-rng", # we don't need DOS-protection, so we let users opt-in to it instead
   "std",
@@ -93,8 +93,8 @@ enum-map = "2.7" # Can't update to 3.1: its `enum-map-derive` moved to syn 3, du
 env_logger = { version = "0.11.8", default-features = false } # 0.11.9+ pulls env_filter 1.x/2.x, duplicating the 0.1.x that android_logger needs
 font-types = { version = "0.12.2", default-features = false, features = ["std"] }
 glow = "0.17.0" # Can't update to 0.18: wgpu 30's wgpu-hal pins glow 0.17, so bumping splits it into two versions
-glutin = { version = "0.32.3", default-features = false }
-glutin-winit = { version = "0.5.0", default-features = false }
+glutin = { git = "https://github.com/mockydevs/glutin", rev = "4afe28190f25c8f040d64eee7f245459adff6e0c", default-features = false }
+glutin-winit = { git = "https://github.com/mockydevs/glutin", rev = "4afe28190f25c8f040d64eee7f245459adff6e0c", default-features = false }
 harfrust = "0.12.0"
 image = { version = "0.25.6", default-features = false } # Can't update to 0.25.7+: it needs png 0.18, which only matches resvg once resvg moves to tiny-skia 0.12 — blocked, see resvg below
 itertools = "0.15.0"
@@ -155,11 +155,12 @@ wasm-bindgen = "0.2.126" # Keep wasm-bindgen version in sync in: setup_web.sh, C
 wasm-bindgen-futures = "0.4.76"
 wayland-cursor = { version = "0.31.14", default-features = false }
 web-sys = "0.3.103"
+url = "2.5"
 web-time = "1.1" # Timekeeping for native and web
 webbrowser = "1.2"
 wgpu = { version = "30.0", default-features = false, features = ["std"] }
 windows-sys = "0.61.2"
-winit = { version = "0.30.13", default-features = false }
+winit = { git = "https://github.com/mockydevs/winit", rev = "4c38d2fe338245fb7a20602466cab94973313792", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -368,3 +369,10 @@ map_unwrap_or = "allow" # so is this one
 self_named_module_files = "allow" # Disabled waiting on https://github.com/rust-lang/rust-clippy/issues/9602
 significant_drop_tightening = "allow" # Too many false positives
 wildcard_imports = "allow" # `use crate::*` is useful to avoid merge conflicts when adding/removing imports
+
+[patch.crates-io]
+winit = { git = "https://github.com/mockydevs/winit", rev = "4c38d2fe338245fb7a20602466cab94973313792" }
+smithay-client-toolkit = { git = "https://github.com/mockydevs/client-toolkit", rev = "d78cab10c8945a83f7a39aaf264c3ae679ca9d1e" }
+
+[patch."https://github.com/rust-windowing/winit"]
+winit = { git = "https://github.com/mockydevs/winit", rev = "4c38d2fe338245fb7a20602466cab94973313792" }

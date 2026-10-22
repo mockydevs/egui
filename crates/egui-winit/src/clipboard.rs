@@ -47,7 +47,10 @@ impl Clipboard {
                 ),
                 feature = "smithay-clipboard"
             ))]
-            smithay: init_smithay_clipboard(_raw_display_handle),
+            smithay: init_smithay_clipboard(
+                _raw_display_handle
+                    .filter(|handle| !matches!(handle, RawDisplayHandle::Wayland(_))),
+            ),
 
             clipboard: Default::default(),
         }
