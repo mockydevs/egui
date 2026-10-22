@@ -161,7 +161,7 @@ mod tests {
         let mut binding = None;
         Binding::bind(&mut binding, &ctx, window);
         remember(&ctx, key(window), |desired| {
-            desired.purpose = ImePurpose::Password
+            desired.purpose = ImePurpose::Password;
         });
         drop(binding);
         let fresh = remember(&ctx, key(window), |_| {})

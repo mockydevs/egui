@@ -171,8 +171,8 @@ mod tests {
     #[test]
     fn file_paths_are_local_and_bounded() {
         use std::path::PathBuf;
-        let root = std::env::temp_dir().join("image with space.png");
-        assert!(super::valid_paths(&[root.clone()]));
+        let root = std::path::absolute("image with space.png").unwrap();
+        assert!(super::valid_paths(core::slice::from_ref(&root)));
         assert!(!super::valid_paths(&[]));
         assert!(!super::valid_paths(&[PathBuf::from("relative.png")]));
         assert!(!super::valid_paths(&vec![root; 257]));
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn file_uris_preserve_spaces_and_unicode() {
-        let path = std::env::temp_dir().join("image with space ✓.png");
+        let path = std::path::absolute("image with space ✓.png").unwrap();
         let uri = url::Url::from_file_path(&path).unwrap();
         assert_eq!(super::parse_uris(&[uri.into()]), Some(vec![path]));
     }
